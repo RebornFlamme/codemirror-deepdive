@@ -143,7 +143,48 @@ export class TextNode extends Text {
     }
 
     decompose(from: number, to: number, target: Text[], open: Open): void {
-        
+        // pos = offset du premier caractère de l'enfant courant, dans le repère
+        // de CE nœud (from/to sont déjà exprimés dans ce repère).
+        let pos = 0;
+
+        for (const child of this.children) {
+            const end = pos + child.length;
+
+            // On regarde si ça intersecte l'interval
+            if (from <= end && to >= pos) {
+                // Deux étapes en une expression.
+                //
+                // 1. Le masque : quels bords de l'intervalle tombent DANS cet
+                //    enfant ? On est déjà dans le `if` d'intersection, donc
+                //    `pos <= from` équivaut à `from ∈ [pos, end]`, et
+                //    `end >= to` à `to ∈ [pos, end]`. Un enfant strictement
+                //    intérieur n'en porte aucun et ressort à 0.
+                //
+                // 2. Le `& open` : un bord ne compte que s'il est touché ET
+                //    ouvert. Sans ce filtre on ouvrirait de vraies frontières de
+                //    ligne et on souderait des morceaux devant rester séparés.
+                const childOpen = open & (
+                    (pos <= from ? Open.From : 0) |
+                    (end >= to ? Open.To : 0)
+                );
+
+                if (pos >= from && end <= to && !childOpen) {
+                    // Entièrement contenu et aucun bord ouvert : on partage le
+                    // sous-arbre tel quel, sans descendre ni rien recopier.
+                    // C'est le seul endroit qui rend decompose sous-linéaire.
+                    target.push(child);
+                } else {
+                    // Sinon on descend, en traduisant l'intervalle dans le repère
+                    // de l'enfant. Le bit To empêche le raccourci ci-dessus au
+                    // bord droit, ce qui garantit que le prochain morceau soudé
+                    // trouvera bien une feuille à dépiler.
+                    child.decompose(from - pos, to - pos, target, childOpen);
+                }
+            }
+
+            // +1 pour le \n de jonction entre deux enfants
+            pos = end + 1;
+        }
     }
 }
 

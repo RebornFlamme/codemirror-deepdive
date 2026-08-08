@@ -150,9 +150,25 @@ truthiness va dans le bon sens.
   alors que `str.slice(0, -1)` compte depuis la fin. `concat` **retourne** un tableau,
   il ne mute pas.
 
+Côté `TextNode` :
+
+- `childOpen = open & ((pos <= from ? Open.From : 0) | (end >= to ? Open.To : 0))` — on
+  construit d'abord le masque « quels bords de l'intervalle cet enfant touche », puis le
+  `&` filtre les deux bords d'un coup. Un enfant du milieu ressort avec `0`.
+- `childOpen` sert **deux fois** : il interdit le raccourci de partage
+  (`pos >= from && end <= to && !childOpen`) et il est passé à la descente.
+- L'intervalle est traduit dans le repère de l'enfant : `child.decompose(from - pos,
+  to - pos, ...)`. La feuille reçoit donc des bornes qui débordent (`from` négatif,
+  `to > this.length`) — c'est normal, elle ne doit pas lever.
+- `pos = end + 1` après chaque enfant (le `\n` de jonction).
+- **Pas de raccourci « nœud entier »** : `decompose(0, length)` sur un `TextNode` empile
+  ses enfants un par un, pas le nœud lui-même. C'est aussi le comportement de CM6 —
+  le partage se joue au niveau des enfants, l'assemblage reconstruira.
+
 Invariant de test : pour toute paire `from <= to`, recoller la décomposition avec
 `join("\n")` doit redonner `toString().slice(from, to)`. Une double boucle sur toutes
-les paires vaut trente cas écrits à la main.
+les paires vaut trente cas écrits à la main. Prendre un arbre dont les frontières
+d'enfants **ne coïncident pas** avec les frontières de lignes, sinon on ne teste rien.
 
 ## Style
 
