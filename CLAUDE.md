@@ -170,6 +170,68 @@ Invariant de test : pour toute paire `from <= to`, recoller la décomposition av
 les paires vaut trente cas écrits à la main. Prendre un arbre dont les frontières
 d'enfants **ne coïncident pas** avec les frontières de lignes, sinon on ne teste rien.
 
+### Assemblage et `slice`
+
+```ts
+static from(children: Text[], length?: number): Text   // sur TextNode
+slice(from: number, to: number = this.length): Text     // concrète sur Text
+```
+
+- `TextNode.from` : liste à un élément → le rendre tel quel (ne pas emballer), sinon un
+  `TextNode`. Le paramètre `length` de CM6 est une optimisation qui suppose un
+  constructeur *recevant* la longueur ; le nôtre la calcule, donc il ne sert à rien tant
+  qu'on n'a pas fait A5. C'est aussi `from` qui portera le rééquilibrage.
+- `slice` s'écrit **une seule fois sur `Text`** : elle n'appelle que `decompose`
+  (abstraite) et l'assemblage. Elle doit rendre `TextNode.from(target)` — prendre
+  `target[0]` ne marche que si la découpe tient dans un seul enfant (72 échecs sur
+  120 paires sinon).
+- **`slice` recadre, `line`/`lineAt` lèvent.** Fonction `clip` au niveau module :
+  `from` recadré d'abord, puis `to` borné par le bas avec ce `from` déjà recadré — un
+  intervalle inversé devient vide au lieu d'une erreur. `replace` réutilisera `clip`.
+- `to: number = this.length` plutôt que `to?: number` : la valeur par défaut rend déjà
+  le paramètre optionnel à l'appel, sans réintroduire `undefined` dans le type.
+- **`0 as Open` est obligatoire.** Depuis TS 5, un enum numérique n'accepte plus un
+  littéral hors de ses membres déclarés — `Open` ne contient que 1 et 2. CM6 écrit le
+  même cast.
+- `slice(0)` d'un `TextNode` rend un **nouveau** nœud, pas `this` : `decompose` empile
+  les enfants un par un. Les sous-arbres, eux, sont bien partagés par identité.
+
+### `replace` et `append` (bloc A4)
+
+```ts
+replace(from: number, to: number, text: Text): Text   // concrète sur Text
+append(other: Text): Text
+```
+
+`replace` = `clip` + **trois** `decompose` dans un même `parts` + `TextNode.from`.
+Aucune boucle, et surtout **aucun `if` sur les sauts de ligne** — c'est le critère de
+réussite du bloc A énoncé dans `PLAN.md`.
+
+| appel | intervalle | drapeaux |
+|---|---|---|
+| préfixe | `[0, from)` sur `this` | `Open.To` |
+| insertion | `[0, text.length)` sur `text` | `Open.From \| Open.To` |
+| suffixe | `[to, this.length)` sur `this` | `Open.From` |
+
+Seuls les bords **extérieurs** restent fermés (début du préfixe, fin du suffixe) : ce sont
+les vraies extrémités du document. Les deux jointures internes sont ouvertes des deux côtés.
+
+- `clip(this, ...)` et non `clip(text, ...)` : `from`/`to` sont des positions dans le
+  document, pas dans l'insertion.
+- Le garde `if (text.length)` protège du cas dégénéré `TextLeaf([])`, dont la soudure
+  lirait un `text[0]` inexistant et produirait `"undefined"`. Avec `TextLeaf([""])`
+  (le document vide correct) il ne change rien.
+- **`append` ne rajoute pas de `\n`.** `a.append(b)` vaut `a.toString() + b.toString()` :
+  `["ab","cd"].append(["ef","gh"])` donne `"ab\ncdef\ngh"`. C'est cohérent avec le fait
+  que ce soit `replace(length, length, other)` — une insertion en fin de document — et
+  c'est aussi le comportement de CM6. Pour ajouter une ligne, insérer `["", ...]`.
+
+Test du bloc : triple boucle `(from, to, insertion)` comparée à
+`s.slice(0, f) + ins.join("\n") + s.slice(t)`, avec au moins les insertions `[""]`,
+`["X"]`, `["X","Y"]`, `["", ""]`. Vérifier aussi que `length`/`lines` du résultat
+correspondent toujours à son `toString()` — la reconstruction doit préserver les
+métriques en cache.
+
 ## Style
 
 Code et commentaires en français. Tests Vitest en français également.

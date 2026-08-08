@@ -61,6 +61,66 @@ export abstract class Text {
     // un enum c'est juste un number déguisé
     // et on utilise l'opératueur | qui est une porte OU bit à bit en JS
     abstract decompose(from: number, to: number, target: Text[], open: Open): void;
+
+    // Le texte de l'intervalle [from, to), comme document autonome.
+    // Contrairement à line/lineAt qui lèvent, slice RECADRE silencieusement :
+    // ses bornes peuvent venir d'un calcul périmé (convention CM6).
+    slice(from: number, to: number = this.length): Text {
+        [from, to] = clip(this, from, to);
+
+        const target: Text[] = [];
+        // 0 : les deux bords fermés — un slice ne se soude à rien.
+        // Le `as Open` est nécessaire, TS n'accepte pas un littéral hors des
+        // membres déclarés de l'enum.
+        this.decompose(from, to, target, 0 as Open);
+
+        // decompose empile PLUSIEURS morceaux : il faut les assembler, pas
+        // prendre le premier.
+        return TextNode.from(target);
+    }
+
+    // Remplace [from, to) par `text`. Rend un NOUVEAU document, this est intact.
+    replace(from: number, to: number, text: Text): Text {
+        // Bien comprendre pourquoi on ouvre tout
+        
+        // from et to sont des positions dans CE document, pas dans l'insertion.
+        [from, to] = clip(this, from, to);
+
+        const parts: Text[] = [];
+
+        // Les trois morceaux atterrissent dans le MÊME parts : les soudures se
+        // font au fur et à mesure, chaque appel trouvant le précédent déjà empilé.
+        //
+        // Seuls les bords extérieurs restent fermés (le début du préfixe et la
+        // fin du suffixe) : ce sont les vraies extrémités du document. Les deux
+        // jointures internes sont ouvertes des deux côtés.
+
+        // Préfixe : son bord droit n'est pas une fin de ligne, l'insertion le prolonge.
+        this.decompose(0, from, parts, Open.To); // le To de l'intervalle est ouvert
+
+        // Insertion : elle prolonge le préfixe ET est prolongée par le suffixe.
+        // Le garde évite le cas dégénéré d'une feuille sans aucune ligne, dont
+        // la soudure lirait un text[0] inexistant.
+        if (text.length) text.decompose(0, text.length, parts, Open.From | Open.To);
+
+        // Suffixe : son bord gauche prolonge ce qui précède.
+        this.decompose(to, this.length, parts, Open.From); // le from est ouvert
+
+        return TextNode.from(parts);
+    }
+
+    // Concaténation : un remplacement de l'intervalle vide en fin de document.
+    append(other: Text): Text {
+        return this.replace(this.length, this.length, other);
+    }
+}
+
+// Recadre un intervalle sur les bornes du document.
+// L'ordre compte : `to` est borné par le bas avec le `from` DÉJÀ recadré, ce qui
+// transforme un intervalle inversé en intervalle vide plutôt qu'en erreur.
+function clip(text: Text, from: number, to: number): [number, number] {
+    from = Math.max(0, Math.min(text.length, from));
+    return [from, Math.max(from, Math.min(text.length, to))];
 }
 
 export class TextNode extends Text {
@@ -185,6 +245,15 @@ export class TextNode extends Text {
             // +1 pour le \n de jonction entre deux enfants
             pos = end + 1;
         }
+    }
+
+    static from(children: Text[], length?: number): Text {
+        // length dans CM6 on a dans le constructeur un paramètre length 
+        // poru éviter le calcul nous on ne l'a pas dans la verison naive OK
+        if (children.length === 1) {
+            return(children[0]);
+        };
+        return(new TextNode(children));
     }
 }
 
