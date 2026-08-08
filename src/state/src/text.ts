@@ -15,6 +15,21 @@ export type Line = {
     get length(): number
 }
 
+// Enum qui permet de savoir si l'intervalle est ouvert ou fermé. 
+// cela permet de savoir s'il faut faire des sauts de lignes
+// pour le comprendre il faut le regarder en binaire
+// Open.from = 1 -> 01
+// Open.to = 2 -> 10
+// => ça ne se chevauche pas
+
+// Open.From => from est ouvert
+// Open.To => To est ouvert
+
+const enum Open {
+    From = 1,
+    To = 2
+}
+
 export abstract class Text {
     // le nombre de lignes
     abstract readonly lines: number;
@@ -41,6 +56,11 @@ export abstract class Text {
         line: number, // nb de lignes situées AVANT ce nœud
         offset: number // offset du 1er caractère de ce nœud
     ): Line;
+
+    // extrait le texte entre from et to et l'empile dans target
+    // un enum c'est juste un number déguisé
+    // et on utilise l'opératueur | qui est une porte OU bit à bit en JS
+    abstract decompose(from: number, to: number, target: Text[], open: Open): void;
 }
 
 export class TextNode extends Text {
@@ -121,6 +141,10 @@ export class TextNode extends Text {
         // en cache sont cohérentes.
         throw new RangeError(`${isLine ? "line" : "offset"} ${target} is not in the document`);
     }
+
+    decompose(from: number, to: number, target: Text[], open: Open): void {
+        
+    }
 }
 
 export class TextLeaf extends Text {
@@ -140,12 +164,12 @@ export class TextLeaf extends Text {
         if (this.text.length !== 0) {
             this.length += text.length - 1;
         }
-    }
+    };
 
     // je fais un getter pour être consistant avec CM6
     get lines(): number {
         return(this.text.length);
-    }
+    };
 
     toString(): string {
         let output = "";
@@ -156,21 +180,21 @@ export class TextLeaf extends Text {
             output += line;
         }
         return(output);
-    }
+    };
 
     lineAt(target: number): Line {
         if (target < 0 || target > this.length) {
             throw new RangeError(`offset ${target} is not in the document`)
         }
         return this.lineInner(target, false, 0, 0);
-    }
+    };
 
     line(n: number): Line {
         if (n < 1 || n > this.lines) {
             throw new RangeError(`line number ${n} is not in the document`)
         };
         return this.lineInner(n, true, 0, 0);
-    }
+    };
 
 
     lineInner(
@@ -211,5 +235,110 @@ export class TextLeaf extends Text {
         };
 
         throw new RangeError(`${isLine ? "line" : "offset"} ${target} is not in the document`);
+    };
+
+    // Mon premier essai cruellement pas élégant
+    // decompose(from: number, to: number, target: Text[], open: Open): void {
+        
+    //     // ne pas oublier \n qui fait un +1 
+        
+    //     if (from <= 0 && to >= this.length) {
+    //         target.push(this);
+    //         return;
+    //     };
+
+    //     const text = [];
+    //     let cumLength = 0;
+
+    //     for (const line of this.text) {
+
+    //         if (cumLength + line.length <= from) {
+    //             cumLength += line.length + 1;
+    //             continue
+    //         }
+
+    //         // Le premier bout de texte 
+    //         if (cumLength + line.length > from && text.length === 0) {
+    //             text.push(line.slice(from - cumLength, to - cumLength));
+    //             continue
+    //         }
+
+    //         // le dernier bout de texte
+    //         if (to <= cumLength + line.length) {
+    //             // ici on peut mettre 0, si le [from, to] avait été contenu dans une seule ligne
+    //             // il aurait été catch au-desssus
+    //             text.push(line.slice(0, to - cumLength));
+    //             break
+    //         }
+
+    //         // tous les bout de texte du milieu
+    //         text.push(line);
+    //         cumLength += line.length + 1;
+    //     };
+
+    //     target.push(new TextLeaf(text));
+    //     return;
+    // };
+
+    decompose(from: number, to: number, target: Text[], open: Open): void {
+        // Deux questions distinctes : QUEL est le morceau, puis COMMENT on le pose.
+        // Le raccourci ne répond qu'à la première — pas de return, pas de push ici,
+        // sinon la soudure est sautée (c'est le cas du suffixe dans replace).
+        let piece: TextLeaf;
+
+        if (from <= 0 && to >= this.length) {
+            // L'intervalle couvre toute la feuille : on la partage telle quelle.
+            piece = this;
+        } else {
+            const lines: string[] = [];
+            let cumLength = 0;
+
+            for (const line of this.text) {
+                const lineFrom = cumLength;
+                const lineTo = lineFrom + line.length;
+
+                // cumLength avance pour TOUTES les lignes : c'est le compteur de
+                // position, il ne dépend pas de ce qu'on décide de garder.
+                // +1 pour le \n qui suit la ligne.
+                cumLength += line.length + 1;
+
+                // Bornes larges des deux côtés : une ligne qui ne touche
+                // l'intervalle que par son extrémité compte quand même, sinon
+                // decompose(3, 4) perdrait une des deux lignes vides de "\n".
+                if (lineTo < from || to < lineFrom) continue;
+
+                // Une seule expression pour les quatre situations (première ligne,
+                // milieu, dernière, ligne unique contenant tout l'intervalle) :
+                // l'intervalle ramené dans le repère de la ligne, puis recadré
+                // sur la ligne. Sur une ligne du milieu, les deux bornes sont
+                // neutralisées et on récupère la ligne entière.
+                lines.push(line.slice(
+                    Math.max(0, from - lineFrom),
+                    Math.min(to - lineFrom, line.length),
+                ));
+            }
+
+            piece = new TextLeaf(lines);
+        }
+
+        if (open & Open.From) {
+            // Le bit From dit que ce morceau prolonge le précédent : sa première
+            // ligne et la dernière du précédent n'en forment plus qu'une.
+            const prev = target.pop();
+            if (!(prev instanceof TextLeaf)) {
+                // Invariant garanti par l'appelant — côté TextNode c'est le rôle
+                // du bit To. On lève plutôt que de souder dans le vide.
+                throw new Error("Open.From exige une feuille à souder dans target");
+            }
+
+            const last = prev.text.length - 1;
+            const fused = prev.text.slice(0, last)
+                .concat(prev.text[last] + piece.text[0])
+                .concat(piece.text.slice(1));
+
+            target.push(new TextLeaf(fused));
+        } else {
+            target.push(piece);
+        }
     }
 }

@@ -1,5 +1,11 @@
 # minicm — clone pédagogique minimal de CodeMirror 6
 
+## Instructions 
+- Lire PLAN.md avant de commencer à répondre à l'utilisateur absolument, et en entier. 
+- Dans le cahier des charges que tu donnes, bien indiquer la signature de la fonction. 
+
+
+
 ## Commandes
 
 | But | Commande |
@@ -105,6 +111,48 @@ savoir où elle se trouve, le parent lui transmet son repère absolu.
 Invariant utile pour tester : pour tout offset `o`, `lineAt(o)` doit vérifier
 `from <= o <= to`, `toString().slice(from, to) === text`, et `line(number)` doit
 redonner les mêmes `from`/`to`.
+
+### `decompose` : extraire un intervalle (bloc A3)
+
+```ts
+decompose(from: number, to: number, target: Text[], open: Open): void
+```
+
+Ne retourne rien : **empile** dans `target` les morceaux couvrant `[from, to)`.
+Plusieurs appels sur le même `target` se recollent au fur et à mesure — c'est ce qui
+permet à `replace` d'être trois appels sans aucun cas particulier.
+
+`const enum Open { From = 1, To = 2 }` : **drapeaux de bits**, pas un choix parmi deux.
+`0` = les deux bords fermés, `Open.From | Open.To` = 3 = les deux ouverts. On teste avec
+`&`, on combine avec `|`. Fermé = absence de bit, donc `0` est le défaut sûr et la
+truthiness va dans le bon sens.
+
+- **`From` est testé, `To` ne l'est jamais.** Une frontière est partagée entre deux
+  morceaux voisins ; comme on empile, seul le côté gauche peut souder (le voisin de
+  droite n'existe pas encore). `To` sert uniquement, côté `TextNode`, à interdire
+  d'empiler un sous-arbre entier au bord droit — ce qui garantit que le `pop()` de la
+  soudure suivante trouve bien une **feuille**.
+- **Le raccourci « feuille entière » décide du morceau, pas de la pose.** Un `return`
+  après `target.push(this)` saute la soudure (cas du suffixe dans `replace`). Structure :
+  `piece = raccourci ? this : new TextLeaf(taillé)`, *puis* un seul bloc de pose.
+- **Une seule expression pour les quatre situations** (première ligne / milieu /
+  dernière / ligne unique) :
+  `line.slice(max(0, from - lineFrom), min(to - lineFrom, line.length))`.
+  Sur une ligne du milieu les deux bornes sont neutralisées. Écrire une trichotomie
+  premier/milieu/dernier est le piège annoncé par `PLAN.md`.
+- **`cumLength` avance pour toutes les lignes**, y compris celles qu'on ignore : c'est un
+  compteur de position, pas de contenu. Un `continue` placé avant l'incrément fausse tous
+  les offsets suivants.
+- **Bornes larges** dans le test d'intersection (`lineTo < from || to < lineFrom` →
+  ignorer). Un `<` strict fait perdre une ligne vide sur `decompose(3, 4)`, qui doit
+  rendre `"\n"` (deux lignes vides).
+- **Pièges JS** : `arr[-1]` est `undefined` (les tableaux n'ont pas d'indices négatifs),
+  alors que `str.slice(0, -1)` compte depuis la fin. `concat` **retourne** un tableau,
+  il ne mute pas.
+
+Invariant de test : pour toute paire `from <= to`, recoller la décomposition avec
+`join("\n")` doit redonner `toString().slice(from, to)`. Une double boucle sur toutes
+les paires vaut trente cas écrits à la main.
 
 ## Style
 
