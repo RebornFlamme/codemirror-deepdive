@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Text, TextLeaf, TextNode } from "../src/state/rope.ts";
+import { Text, TextLeaf, TextNode } from "../src/state/src/text.ts";
 
 /**
  * Invariant central du rope : les métriques mises en cache doivent toujours

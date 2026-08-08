@@ -18,10 +18,15 @@ compile. Ce projet a déjà eu 10 erreurs `tsc` avec 18/18 tests au vert.
 ## Structure
 
 ```
-src/state/rope.ts   Text (abstraite), TextNode, TextLeaf — la structure du document
-src/main.ts         point d'entrée (encore le template Vite)
-test/rope.test.ts   suite Vitest
+src/state/src/text.ts   Text (abstraite), TextNode, TextLeaf, type Line
+src/main.ts             point d'entrée (encore le template Vite)
+test/rope.test.ts       suite Vitest (importe ../src/state/src/text.ts)
 ```
+
+Le rope vivait auparavant dans `src/state/rope.ts` ; il a été déplacé vers
+`src/state/src/text.ts` pour coller à l'arborescence de CM6. Le test importe le
+chemin en dur : **déplacer le module casse silencieusement `npm test`** (vitest
+n'échoue que sur la résolution, `tsc` le signale aussi).
 
 `tsconfig.json` inclut `src` et `test`.
 
@@ -67,8 +72,39 @@ Conséquences à respecter :
   ce qui rend `toString()` réversible avec `split("\n")`.
 - Document vide = `[""]` (1 ligne, length 0), **pas** `[]`.
 
-⚠️ Cas non tranché : `new TextLeaf([])` donne `length === -1` avec la formule actuelle.
-Soit l'interdire, soit le normaliser en `[""]`.
+⚠️ Cas non tranché : `new TextLeaf([])` est désormais garde-fou côté `length` (le
+`- 1` n'est appliqué que si `text.length !== 0`, donc `length === 0`), mais il reste
+incohérent : `lines === 0` et `lineAt(0)` lève. Soit l'interdire, soit le normaliser
+en `[""]`.
+
+### `lineAt` / `line` : une seule descente (`lineInner`)
+
+`lineAt(offset)` et `line(n)` partagent un moteur unique, `lineInner(target, isLine,
+line, offset)`, déclaré **`abstract` sur `Text`** — sans cette déclaration,
+`child.lineInner(...)` ne typecheck pas depuis `TextNode`.
+
+Le principe est la *descente d'information* : au lieu que la feuille remonte pour
+savoir où elle se trouve, le parent lui transmet son repère absolu.
+
+- `line` = nombre de lignes situées **avant** ce nœud → la 1ʳᵉ ligne du nœud porte le
+  numéro `line + 1`.
+- `offset` = offset absolu du **premier caractère** du nœud.
+- `TextNode` accumule `cumLength += child.length + 1` (le `+ 1` = le `\n` de jonction)
+  et `cumLines += child.lines`, puis récurse sur **`child`**, pas sur `this` (piège :
+  `this.lineInner` boucle à l'infini).
+- Le test d'appartenance porte sur `target`, pas sur `offset` : `target <= end` avec
+  `end = line + cumLines + child.lines` (mode ligne) ou `offset + cumLength +
+  child.length` (mode offset).
+- Dans `TextLeaf`, `to` est la position du `\n` qui **termine** la ligne, donc
+  `target <= to` rattache ce `\n` à la ligne précédente (comportement CM6).
+- Ne jamais nommer la variable de boucle `line` dans `TextLeaf.lineInner` : elle
+  masquerait le paramètre de décalage de numérotation.
+- Les bornes sont validées dans `lineAt`/`line` (`RangeError`) ; le `throw` final de
+  `lineInner` est donc inatteignable si les métriques en cache sont correctes.
+
+Invariant utile pour tester : pour tout offset `o`, `lineAt(o)` doit vérifier
+`from <= o <= to`, `toString().slice(from, to) === text`, et `line(number)` doit
+redonner les mêmes `from`/`to`.
 
 ## Style
 
