@@ -2,7 +2,8 @@
 
 ## Instructions 
 - Lire PLAN.md avant de commencer à répondre à l'utilisateur absolument, et en entier. 
-- Dans le cahier des charges que tu donnes, bien indiquer la signature de la fonction. 
+- Dans le cahier des charges que tu donnes, bien indiquer la signature de la fonction que tu me demandes de coder.
+- Je ne veux faire preuve d'aucune initiative par rapport à CodeMirror, les seuls écarts tolérés sont des simplifications pédagogiques que tu me soumettras clairement.  
 
 
 
@@ -231,6 +232,59 @@ Test du bloc : triple boucle `(from, to, insertion)` comparée à
 `["X"]`, `["X","Y"]`, `["", ""]`. Vérifier aussi que `length`/`lines` du résultat
 correspondent toujours à son `toString()` — la reconstruction doit préserver les
 métriques en cache.
+
+### Rééquilibrage (bloc A5)
+
+```ts
+const enum Tree { BranchShift = 5, Branch = 1 << Tree.BranchShift }  // 32
+
+static of(text: readonly string[]): Text                 // sur Text
+static empty: Text                                       // affecté en bas du module
+abstract flatten(target: string[]): void
+static split(text: readonly string[], target: Text[]): Text[]   // sur TextLeaf
+static from(children: Text[], length?: number): Text            // sur TextNode
+```
+
+`Branch` compte des **lignes**, jamais des caractères. `BranchShift` sert aux seuils
+dérivés (`>> BranchShift` = /32, `>> (BranchShift ± 1)` = /16 et /64).
+
+**Trois pièces interdépendantes, dans cet ordre :**
+
+1. **Découpe après soudure** dans `TextLeaf.decompose` : si le résultat fusionné dépasse
+   `Branch`, empiler **deux** feuilles (`mid = joined.length >> 1`, `slice(0, mid)` et
+   `slice(mid)`) au lieu d'une. Sans `else` remettant le `push` simple, le cas courant
+   n'empile plus rien.
+2. **`Text.of`** : le seul point d'entrée public. Lève sur `[]`, rend `Text.empty` sur
+   `[""]`, une feuille sous le seuil, sinon `TextNode.from(TextLeaf.split(...))`.
+   C'est le cas de base de l'invariant « aucune feuille > 32 lignes » — sans lui, deux
+   moitiés ne suffisent pas (une insertion `new TextLeaf([...1000 lignes])` le casse).
+3. **`TextNode.from`** : compter les lignes → effondrement en une feuille sous le seuil
+   (via `flatten`) → sinon `chunk = max(Branch, lines >> BranchShift)`, `maxChunk`,
+   `minChunk`, puis `add`/`flush` avec quatre branches (ouvrir un nœud trop gros,
+   pousser seul un enfant assez gros, fusionner deux petites feuilles voisines, sinon
+   empiler dans le paquet courant).
+
+`Text.empty` : `static empty: Text` déclaré sans initialiseur dans `Text`, affecté au
+**niveau module après `TextLeaf`** (`Text.empty = new TextLeaf([""])`). Les classes ne
+sont pas hoistées — un initialiseur direct lèverait un `ReferenceError` à l'import.
+`strictPropertyInitialization` ne s'applique qu'aux champs d'instance, donc pas de `!`.
+
+`flatten` ne soude **rien** : à la jonction entre deux enfants, les deux lignes restent
+distinctes. La soudure n'existe que quand un bord est *ouvert*.
+
+Ne pas ajouter de raccourci `if (children.length === 1) return children[0]` en tête de
+`from` : CM6 traite ce cas à la fin et dans `flush`. En tête, il court-circuite
+l'effondrement (un nœud de 10 lignes doit devenir une feuille).
+
+Mesures de référence après implémentation (`replace` au milieu, en boucle) :
+
+| éditions | lignes | profondeur | feuilles | max lignes/feuille | temps |
+|---|---|---|---|---|---|
+| 1 000 | 1 001 | 2 | 32 | 32 | 25 ms |
+| 5 000 | 5 001 | 4 | 168 | 32 | 74 ms |
+| 10 000 | 10 001 | 4 | 330 | 32 | 146 ms |
+
+Avant A5 : profondeur 1, une feuille de 10 001 lignes, temps quadratique.
 
 ## Style
 

@@ -30,6 +30,15 @@ const enum Open {
     To = 2
 }
 
+// ici on indique les constantes de branchements de l'arbre.
+// Ce que ça veut dire : une feuille ne doit pas dépasser 32 lignes. 
+const enum Tree {
+    BranchShift = 5,
+    Branch = 1 << Tree.BranchShift // 32 l'opérateur << prend une représentation binaire et pousse tous ses bits vers la gauche
+    // 1 -> 00001
+    // 1 << 1 -> 00010
+}
+
 export abstract class Text {
     // le nombre de lignes
     abstract readonly lines: number;
@@ -104,7 +113,7 @@ export abstract class Text {
         if (text.length) text.decompose(0, text.length, parts, Open.From | Open.To);
 
         // Suffixe : son bord gauche prolonge ce qui précède.
-        this.decompose(to, this.length, parts, Open.From); // le from est ouvert
+        this.decompose(to, this.length, parts, Open.From); // le from est
 
         return TextNode.from(parts);
     }
@@ -113,6 +122,25 @@ export abstract class Text {
     append(other: Text): Text {
         return this.replace(this.length, this.length, other);
     }
+
+    static of(text: readonly string[]): Text {
+        if (text.length === 0) {
+            throw new RangeError('You must provide a non empty list');
+        } else if (text.length == 1 && !text[0]) {
+            // ce cas est pour le texte avec une ligne vide
+            return(Text.empty);
+        } else if (text.length <= Tree.Branch) {
+            return(new TextLeaf(text))
+        } else {
+            return TextNode.from(TextLeaf.split(text, []));
+        }
+    }
+
+    abstract flatten(target: string[]): void;
+
+    // instance partagée -> sert à faire de l'égalité physique au lieu de comparer des length ! 
+    // c'est défini à la fin du module après la définition de TextLeaf
+    static empty: Text;
 }
 
 // Recadre un intervalle sur les bornes du document.
@@ -247,13 +275,95 @@ export class TextNode extends Text {
         }
     }
 
+    // Assemble une liste plate de morceaux en un arbre équilibré.
+    // `length` existe chez CM6 pour éviter de re-sommer les enfants ; notre
+    // constructeur calcule ses métriques lui-même, donc il reste inutilisé.
     static from(children: Text[], length?: number): Text {
-        // length dans CM6 on a dans le constructeur un paramètre length 
-        // poru éviter le calcul nous on ne l'a pas dans la verison naive OK
-        if (children.length === 1) {
-            return(children[0]);
-        };
-        return(new TextNode(children));
+        let totalLines = 0;
+        for (const child of children) {
+            totalLines += child.lines;
+        }
+
+        // Effondrement : sous le seuil, pas d'arbre du tout, une simple feuille.
+        if (totalLines < Tree.Branch) {
+            const flat: string[] = [];
+            for (const child of children) {
+                // ici la signature de flatten est bien utile ! 
+                child.flatten(flat);
+            }
+            return new TextLeaf(flat);
+        }
+
+        // Pour comprendre ce qu'il se passe ici : 
+        // chaque noeud vise 32 enfants ! -> pas seulement chaque leaf vise 32 lignes
+        // on calcule le nb de lignes par enfants
+        // Taille de paquet visée, jamais sous Branch, plus la fourchette de
+        // tolérance autour : on n'exige pas des paquets égaux, seulement qu'ils
+        // restent entre la moitié et le double de la cible.
+        const chunk = Math.max(Tree.Branch, totalLines >> Tree.BranchShift);
+        const maxChunk = chunk << 1;
+        const minChunk = chunk >> 1;
+
+        // chunked = les paquets terminés ; currentChunk = celui en cours.
+        const chunked: Text[] = [];
+        let currentChunk: Text[] = [];
+        let currentLines = 0;
+
+        function flush(): void {
+            if (currentLines === 0) return;
+            // Un paquet d'un seul enfant n'a pas besoin d'un nœud autour.
+            // Sinon on récurse : c'est ce qui crée les niveaux de l'arbre.
+            chunked.push(currentChunk.length === 1
+                ? currentChunk[0]
+                : TextNode.from(currentChunk));
+            currentChunk = [];
+            currentLines = 0;
+        }
+
+        function add(child: Text): void {
+            if (child.lines > maxChunk && child instanceof TextNode) {
+                // Trop gros pour un paquet : on l'ouvre d'un cran et on traite
+                // ses enfants à sa place. Une feuille ne peut pas tomber ici
+                // (elle fait au plus Branch lignes, et chunk >= Branch).
+                for (const node of child.children) add(node);
+                return;
+            }
+
+            if (child.lines > minChunk && (currentLines > minChunk || !currentLines)) {
+                // Assez gros pour tenir seul : on ferme le paquet en cours et on
+                // le pousse tel quel — c'est ici que le partage de sous-arbre survit.
+                flush();
+                chunked.push(child);
+                return;
+            }
+
+            const last: Text | undefined = currentChunk[currentChunk.length - 1];
+            if (child instanceof TextLeaf && currentLines &&
+                last instanceof TextLeaf &&
+                child.lines + last.lines <= Tree.Branch) {
+                // Deux petites feuilles voisines : on les fusionne au lieu
+                // d'empiler des feuilles sous-remplies.
+                currentChunk[currentChunk.length - 1] =
+                    new TextLeaf(last.text.concat(child.text));
+                currentLines += child.lines;
+                return;
+            }
+
+            if (currentLines + child.lines > chunk) flush();
+            currentChunk.push(child);
+            currentLines += child.lines;
+        }
+
+        for (const child of children) add(child);
+        flush();
+
+        return chunked.length === 1 ? chunked[0] : new TextNode(chunked);
+    }
+
+    flatten(target: string[]): void {
+        for (const child of this.children) {
+            child.flatten(target);
+        }
     }
 }
 
@@ -446,9 +556,43 @@ export class TextLeaf extends Text {
                 .concat(prev.text[last] + piece.text[0])
                 .concat(piece.text.slice(1));
 
-            target.push(new TextLeaf(fused));
+            // ici il faut faire une découpe s'il y a trop de lignes
+            // deprecated : target.push(new TextLeaf(fused));
+            if (fused.length > Tree.Branch) {
+
+                const mid = fused.length >> 1 // pousse la représentation binaire vers la droite ie divise par 2
+
+                target.push(new TextLeaf(fused.slice(0, mid)));
+                target.push(new TextLeaf(fused.slice(mid, fused.length)));
+            } else {
+                target.push(new TextLeaf(fused));
+            }
+
         } else {
             target.push(piece);
         }
     }
+
+    static split(text: readonly string[], target: Text[]): Text[] {
+        let batch: string[] = [];
+        for (const [index, line] of text.entries()) {
+            if (index > 0 && index % Tree.Branch === 0) {
+                target.push(new TextLeaf(batch));
+                batch = [];
+            }
+            batch.push(line);
+        }
+        if (batch.length > 0) {
+            target.push(new TextLeaf(batch));
+        }
+        return(target)
+    }
+
+    flatten(target: string[]): void {
+        for (const line of this.text) {
+            target.push(line);
+        };    
+    }
 }
+
+Text.empty = new TextLeaf([""]);
