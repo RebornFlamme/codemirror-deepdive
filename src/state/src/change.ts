@@ -213,8 +213,26 @@ export class ChangeDesc {
 
         for (let i = 0 ; i < this.sections.length ; i += 2) {
             const len = this.sections[i];
-            const ins = this.sections[i]
-        }
+            const ins = this.sections[i+1];
+
+            if (ins < 0) {
+                sections.push(len);
+                sections.push(ins);
+            } else {
+                sections.push(ins);
+                sections.push(len);
+            }
+        };
+        return(new ChangeDesc(sections));
+    }
+
+    composeDesc(other: ChangeDesc): ChangeDesc {
+        // Pourquoi c'est une méthode difficile? 
+        // les 2 descriptions se basent sur le repère du document initial
+        // donc il ne suffit pas d'appliquer les 2 change desc séquentiellement (ça veut rien dire en soit mais c'ets l'idée)
+        // il faut refaire les positions du second change desc 
+        
+        throw new Error('Unimplemented')
     }
 }
 
@@ -343,6 +361,60 @@ export class ChangeSet extends ChangeDesc {
         if (pos < length) addSection(sections, length - pos, -1);
 
         return new ChangeSet(sections, inserted);
+    }
+
+    // L'inverse de ce changement : appliqué au document que `this` PRODUIT, il
+    // redonne `doc`. C'est littéralement l'undo de l'étape 5.
+    //
+    // `doc` est le document d'AVANT, et il est indispensable : la description
+    // sait qu'elle a supprimé n caractères, elle ne sait pas lesquels. Il faut
+    // aller les relire — c'est tout le point de C1.
+    //
+    // (Ne pas confondre avec `invertedDesc.apply(...)` : ici on CONSTRUIT un
+    // ChangeSet, on n'applique rien. Un cast ne fabriquerait pas `inserted`.)
+    invert(doc: Text): ChangeSet {
+        // fabrique le changement qui undo this. 
+        // sauf que là on est pas dans ChangeDesc, on a besoin de connaitre les caractères supprimés
+        // pour les remettre plus tard, d'ou l'interet d'avoir doc en argument
+
+
+        // Copie mutable : on échange len et ins en place, section par section.
+        const sections = this.sections.slice();
+        const inserted: Text[] = [];
+
+        // pos parcourt l'ANCIEN document. Il avance pour TOUTES les sections,
+        // intactes comprises : c'est un compteur de position, pas de contenu.
+        // Même piège que le cumLength de decompose au bloc A3.
+        let pos = 0;
+
+        for (let i = 0 ; i < sections.length ; i += 2) {
+            // Lus AVANT l'échange, sinon on relit ce qu'on vient d'écrire.
+            const len = sections[i];
+            const ins = sections[i + 1];
+
+            if (ins >= 0) {
+                sections[i] = ins;
+                sections[i + 1] = len;
+
+                // Même discipline d'indexation que addInsert : inserted[k] pour
+                // la section k, bourré de Text.empty jusque-là.
+                const k = i >> 1;
+                while (inserted.length < k) inserted.push(Text.empty);
+
+                // len === 0 : c'était une insertion pure, elle n'avait rien
+                // supprimé — son inverse est une suppression pure, rien à
+                // réinsérer.
+                inserted.push(len ? doc.slice(pos, pos + len) : Text.empty);
+            }
+
+            pos += len;
+        }
+
+        return new ChangeSet(sections, inserted);
+    }
+
+    compose(other: ChangeSet): ChangeSet {
+        throw Error('unimplemented')
     }
 
 }

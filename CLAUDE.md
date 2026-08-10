@@ -2,6 +2,10 @@
 
 ## Instructions 
 - Lire PLAN.md avant de commencer à répondre à l'utilisateur absolument, et en entier. 
+- Lire **PLANbis.md** ensuite : `PLAN.md` décrit le parcours complet et ne bouge pas,
+  `PLANbis.md` décrit l'**ordre réellement suivi** (route courte vers l'étape 3) et
+  tient la liste des briques différées avec leur point de retour. En cas de
+  contradiction sur l'ordre des blocs, `PLANbis.md` fait foi.
 - Dans le cahier des charges que tu donnes, bien indiquer la signature de la fonction que tu me demandes de coder.
 - Je ne veux faire preuve d'aucune initiative par rapport à CodeMirror, les seuls écarts tolérés sont des simplifications pédagogiques que tu me soumettras clairement.  
 
