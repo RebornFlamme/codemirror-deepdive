@@ -286,6 +286,143 @@ Mesures de référence après implémentation (`replace` au milieu, en boucle) :
 
 Avant A5 : profondeur 1, une feuille de 10 001 lignes, temps quadratique.
 
+## Design de `change.ts` (bloc B)
+
+Deux classes : `ChangeDesc` = la **géométrie seule**, `ChangeSet extends ChangeDesc` =
+géométrie + textes insérés. Quatre clients sur cinq (undo, curseur, height map, rendu)
+n'ont besoin que de la géométrie, et l'historique en stocke des milliers — d'où la
+scission. `apply` et `iterChanges` sont les seules méthodes qui vivent sur `ChangeSet`.
+
+### L'encodage : un tableau plat lu par paires
+
+```ts
+readonly sections: readonly number[]   // paires (len, ins)
+```
+
+| section | paire |
+|---|---|
+| `n` caractères intacts | `(n, -1)` |
+| insertion pure de `m` | `(0, m)` |
+| suppression pure de `n` | `(n, 0)` |
+| remplacement | `(n, m)` |
+
+`len` = caractères consommés dans l'**ancien** document, `ins` = `-1` si intacte, sinon
+la longueur du remplacement. Le test partout dans le fichier est `ins < 0`, jamais
+`=== -1`.
+
+**Aucune position n'est stockée** — ni `from`, ni `to`, ni la longueur du document.
+Elles n'existent que pendant un parcours. C'est l'analogue, pour le bloc B, du « le `\n`
+n'est jamais stocké » du rope. Conséquences :
+
+- **couverture totale** : `somme(len) === length`. La description couvre tout le
+  document, y compris ce qui ne change pas. C'est l'invariant qui commande le reste.
+- `length` (avant) et `newLength` (après) sont **dérivés**, pas stockés.
+- « trié et sans chevauchement » n'est pas une précondition à vérifier : c'est
+  inexprimable autrement.
+- trous et changements sont **la même liste lue deux fois**.
+- bloc C : composer et rebaser deviendront un parcours **parallèle** de deux listes,
+  pas une réécriture de positions absolues.
+
+### La règle d'avancement — le seul « truc » du bloc
+
+Deux compteurs en parallèle, `posA` dans l'ancien document, `posB` dans le nouveau :
+
+```
+ins < 0  (intacte)  →  posA += len,  posB += len
+ins >= 0 (changée)  →  posA += len,  posB += ins
+```
+
+En fin de parcours `posA === length` et `posB === newLength`. `iterGaps`, `iterChanges`
+et `mapPos` reposent tous les trois dessus. Piège vécu : en passant d'`iterGaps` à
+`iterChangedRanges` on n'inverse **que le test d'émission**, pas la règle d'avancement.
+
+### Forme canonique — `addSection`
+
+Seul endroit du fichier qui écrit dans `sections`, donc la forme est garantie par
+construction. Quatre règles :
+
+1. jamais de section `len === 0 && ins <= 0` (elle ne décrit rien) ;
+2. deux sections intactes adjacentes fusionnent ;
+3. deux suppressions pures adjacentes fusionnent (même test que 2 : `ins <= 0 &&
+   ins === précédent`, ce qui interdit de mélanger `-1` et `0`) ;
+4. deux insertions pures adjacentes fusionnent leurs `ins`.
+
+**Un remplacement ne fusionne jamais avec son voisin.** Deux changements adjacents
+restent deux sections — `mapPos` doit pouvoir les distinguer. La fusion se joue au
+moment du *rapport*, via le drapeau `individual`.
+
+Corollaire : `empty` (« ne change rien ») ⇔ `sections.length === 0` ou une seule paire
+avec `ins < 0`. Et `ChangeSet.empty(0)` rend `[]`, pas `[0, -1]`.
+
+### `inserted` — le tableau parallèle
+
+`inserted[k]` porte le texte de la paire `k` (indices `2k`, `2k+1`), donc `k = i >> 1`.
+Bourré de `Text.empty` pour les sections qui n'insèrent rien, mais **pas au-delà du
+dernier texte réel** : `inserted` peut être plus court que le nombre de sections, et
+toute lecture hors bornes vaut `Text.empty`. C'est un tableau parallèle, mais son
+invariant est *sûr par défaut* — contrairement à des `from[]`/`to[]` parallèles, où un
+désalignement produirait des positions fausses en silence.
+
+`addInsert` doit être appelée **après** l'`addSection` correspondante (elle lit
+`sections.length` pour connaître l'indice). Si la section vient d'être fusionnée
+(règle 4), il n'y a pas de nouvelle case : les textes sont recollés par `append`.
+
+### Le moteur unique des parcours
+
+`iterChanges(desc, f, individual)` est une **fonction de module** ; `ChangeDesc
+.iterChangedRanges` et `ChangeSet.iterChanges` l'appellent toutes deux avec
+`iterChanges(this, f, individual)`. Le même nom pour la méthode et la fonction ne pose
+pas de problème : les méthodes ne sont pas des identifiants lexicaux. Elle lit
+`(desc as ChangeSet).inserted`, qui vaut `undefined` sur une description nue — verrue
+assumée, présente telle quelle dans CM6. `iterGaps` a sa propre boucle, il n'y a rien à
+factoriser de ce côté.
+
+Notre boucle avance `i += 2` dans l'en-tête (CM6 fait `sections[i++]` dans le corps),
+d'où `inserted[i >> 1]` et `sections[i + 3]` au lieu de `inserted[(i - 2) >> 1]` et
+`sections[i + 1]`. La fusion de groupe utilise une sentinelle `fromA = -1` portée par la
+boucle externe, là où CM6 imbrique un `for(;;)`. Même sortie.
+
+### `apply` — la ligne à ne pas rater
+
+```ts
+doc = doc.replace(fromB, fromB + (toA - fromA), inserted)
+```
+
+On avance de gauche à droite en réaffectant `doc` : ce qui est **à gauche** est déjà
+dans le repère du nouveau document (d'où `fromB`), ce qui est **à droite** ne l'est pas
+encore (d'où la longueur `toA - fromA`, celle de l'ancien). `toB` ne sert pas — il
+donnerait la longueur *insérée*, juste seulement quand les deux coïncident. Le cas qui
+départage : retirer 2 caractères pour en insérer 1.
+
+`apply` **lève** si `this.length !== doc.length` (précondition, pas borne à recadrer).
+
+### `ChangeSet.of` et les simplifications assumées
+
+| point | CM6 | nous |
+|---|---|---|
+| specs désordonnées / chevauchantes | composées entre elles | `RangeError` — composer, c'est le bloc C |
+| `lineSep` | 3ᵉ paramètre | figé sur `DefaultSplit = /\r\n?\|\n/` |
+| `ChangeSet` dans `ChangeSpec` | oui | omis (nécessite `compose`) |
+| `filter`, `toJSON`/`fromJSON` | présents | omis |
+| `addSection(…, forceJoin)` | utilisé par `composeSets` | paramètre absent, à ajouter au bloc C |
+
+`of` est le seul point d'entrée qui fabrique des sections. `to` vaut `from` par défaut
+(insertion pure), une spec `from === to` sans insertion ne produit rien, et la queue
+intacte est ajoutée à la fin — c'est elle qui assure la couverture totale.
+
+### Tests du bloc B
+
+`test/change.test.ts` (métriques + parcours), `test/change-of.test.ts` (construction).
+Les 7 descriptions de référence sont écrites à la main **et** reconstruites par `of`,
+ce qui teste la normalisation. Invariants qui valent les autres réunis :
+
+- trous + changements **pavent** le document, de 0 à `length` côté ancien et de 0 à
+  `newLength` côté nouveau, sans trou ni recouvrement ;
+- un trou désigne la **même sous-chaîne** des deux côtés ;
+- oracle exhaustif : toutes les paires `[from, to)` × plusieurs insertions, comparées à
+  `s.slice(0, from) + insert + s.slice(to)` — l'équivalent B de la double boucle du
+  bloc A3.
+
 ## Style
 
 Code et commentaires en français. Tests Vitest en français également.
