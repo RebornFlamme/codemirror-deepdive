@@ -207,3 +207,4 @@ aucun refactor à prévoir de ce côté.
 | date | événement |
 |---|---|
 | 2026-08-10 | C1 terminé (176 tests). Décision de la route courte. Création de ce document. |
+| 2026-08-11 | **D1 terminé** (223 tests) — `src/state/src/selection.ts`. `extend` laissé de côté (client = les commandes, étape 5), `toJSON`/`fromJSON` omis. Divergence assumée : `inverted` en champ plutôt qu'en bit de `flags`. Prochaine étape : D2. |

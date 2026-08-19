@@ -427,6 +427,87 @@ ce qui teste la normalisation. Invariants qui valent les autres réunis :
   `s.slice(0, from) + insert + s.slice(to)` — l'équivalent B de la double boucle du
   bloc A3.
 
+## Design de `selection.ts` (bloc D1)
+
+`SelectionRange` (une plage) et `EditorSelection` (N plages + `mainIndex`).
+`selection.ts` importe `change.ts` ; **rien ne remonte en sens inverse**.
+
+### `from`/`to` normalisés, sens à part
+
+Une plage stocke toujours `from <= to`. `anchor` (le bout fixe quand on étend) et `head`
+(le bout qui bouge, où est le curseur) sont des **getters dérivés**. Raison : presque
+tous les lecteurs veulent `from`/`to` ; seules les commandes se soucient du sens.
+
+**Divergence assumée avec CM6** : `inverted` est un champ booléen ici, un bit dans
+`flags` chez CM6. Conséquence, le bit 5 de `flags` reste vide — les autres constantes de
+`RangeFlag` gardent les valeurs de CM6 pour que la comparaison reste ligne à ligne.
+
+### `flags` — sentinelles obligatoires
+
+```
+bits 0-2  niveau bidi     7 = non renseigné
+bit  3    AssocBefore  ┐
+bit  4    AssocAfter   ┘ exclusifs, aucun des deux = 0
+bits 6+   goal column   0xffffff = absent
+```
+
+⚠️ **`flags = 0` n'est pas « pas d'information »** : `bidiLevel` rendrait `0` au lieu de
+`null` et `goalColumn` `0` au lieu de `undefined` — un curseur prétendrait viser la
+colonne 0, ce qui casserait la navigation verticale à l'étape 3. Les sentinelles doivent
+être **écrites**. D'où : seules `cursor` et `range` construisent une plage, et `single`
+délègue à `range` au lieu d'appeler le constructeur.
+
+`bidiLevel` est plafonné à 6 (`Math.min`) : 7 écraserait la sentinelle.
+
+### `map` — le paiement de B2
+
+```
+curseur   → mapPos(from, assoc)     ← l'assoc de l'appelant
+plage     → mapPos(from,  1)        ← forcés, l'assoc reçu est IGNORÉ
+            mapPos(to,   -1)
+```
+
+Chaque borne se colle au texte **intérieur** à la plage : du texte inséré pile à une
+frontière reste dehors. Sans ça la sélection grossirait à chaque frappe collée à son bord.
+
+`EditorSelection.map` passe par `create`, et ce n'est pas décoratif : après une
+suppression, deux curseurs distincts peuvent atterrir au même endroit et doivent
+fusionner.
+
+**Identité physique** à trois endroits : `SelectionRange.map` (rien n'a bougé),
+`EditorSelection.map` (`change.empty`), `asSingle` (déjà une seule plage). C'est ce qui
+rend fiable l'`indexOf(main)` de `normalized` — et ce qui permettra à la vue de savoir
+en O(1) que la sélection n'a pas changé.
+
+### L'invariant de `create`
+
+Plages triées par `from`, sans recouvrement, mais elles peuvent **se toucher** si elles
+ne sont pas vides. `create` vérifie en une passe et n'appelle `normalized` (tri + fusion,
+avec allocation) que si l'invariant est violé — même réflexe que le raccourci de partage
+de `decompose`.
+
+Le test diffère selon le type de plage, et c'est délibéré :
+
+```
+vide     : range.from <= pos   → deux curseurs au même point FUSIONNENT
+non vide : range.from <  pos   → deux plages qui se touchent RESTENT deux
+```
+
+Dans `normalized` : la plage principale est retenue **par identité** avant le tri puis
+retrouvée par `indexOf` ; `splice(--i, 2, union)` fait repointer la boucle sur la plage
+fusionnée pour permettre les fusions en cascade ; l'union conserve le **sens** de la
+plage absorbée.
+
+`create([])` lève. `checkSelection(sel, docLength)` est une **fonction de module** (ce
+n'est pas une propriété de la sélection, c'est une validation d'`EditorState`) et lève
+au-delà du document.
+
+### Tests
+
+`test/selection.test.ts`. Les deux qui attrapent le plus : la plage qui ne grossit à
+**aucun** de ses deux bords (justifie le `1`/`-1` forcé), et le test final qui montre
+qu'une plage construite avec `flags = 0` ment sur `bidiLevel` et `goalColumn`.
+
 ## Style
 
 Code et commentaires en français. Tests Vitest en français également.
