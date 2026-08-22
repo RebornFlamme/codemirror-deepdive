@@ -52,9 +52,9 @@ Vérifié dans `reference/codemirror/`, pas de mémoire.
 | `ChangeSet.apply` | ✅ |
 | `iterChangedRanges` | ✅ — c'est lui qui pilote le diff DOM minimal |
 | `mapPos` | ✅ — la sélection qui suit les modifications |
-| `EditorSelection` (D1) | ❌ requis |
-| `EditorState` + `Transaction` (D2) | ❌ requis |
-| facets / `StateField` | ⚠️ noyau minimal seulement |
+| `EditorSelection` (D1) | ✅ |
+| `EditorState` + `Transaction` (D2) | ✅ |
+| facets / `StateField` | ✅ noyau minimal (Facet / StateField / Configuration) |
 | `compose` / `map` (C2, C3) | ⚠️ voir les trois trous ci-dessous |
 
 **La vraie dépendance de l'étape 3 n'est pas l'étape 2, c'est le bloc D.** Une vue n'a
@@ -116,10 +116,10 @@ trois choses — édition multi-curseurs, filtres de transaction, ou l'historiqu
 
 ```
 C1 ✅
- └─→ D1   sélection
-      └─→ D2   état + transaction
-           └─→ étape 2 réduite   Extension / Facet / StateField
-                └─→ étape 3   la vue, le DOM, le viewport, la height map
+ └─→ D1 ✅   sélection
+      └─→ D2 ✅   état + transaction
+           └─→ étape 2 réduite ✅   Extension / Facet / StateField
+                └─→ étape 3   la vue, le DOM, le viewport, la height map   ← ICI
 ```
 
 ### D1 — la sélection
@@ -177,15 +177,38 @@ coûte une session et donne le bon squelette.
 Et l'étape 4 y ramène de force : une décoration n'est pas une valeur qu'on passe à la
 vue, c'est une valeur qu'on *dépose dans un facet* que la vue lit. Idem `ViewPlugin`.
 
-### Étape 3 — la cible
+### Étape 3 — la vue, le DOM, le viewport (la cible)
 
-Inchangée par rapport à `PLAN.md`, y compris la décision de faire la **height map
-complète** à hauteurs variables plutôt qu'une version à hauteur de ligne uniforme.
+**Le découpage canonique est dans `PLAN.md`** : blocs **V** (le rendu, état → DOM), **E**
+(l'édition, DOM → état), **H** (viewport & height map), sous-étapes **V1…H3** avec chacune
+sa ligne *« Démontrable »*. On ne le duplique pas ici — cette section ne garde que ce qui
+relève de la **route** : l'ordre, les contraintes actives, et les simplifications propres au
+chemin court.
 
-Ce qui ne coûte rien à l'ordre choisi : la height map, le viewport, le calcul de la
-tranche visible, les espaces réservés, la phase de mesure, `contentEditable`, la
-relecture du DOM et la synthèse d'un changement. Rien de tout ça ne connaît les facets —
-aucun refactor à prévoir de ce côté.
+**Ordre suivi** : `V1 → V2 → E1 → E2 → H1 → H2 → H3`. Logique « pixels le plus tôt » : on
+affiche (V), on rend éditable (E), et **seulement ensuite** viewport + height map (H) — la
+partie retorse, isolée en fin.
+
+**Contraintes actives** (tant que C2/C3 différés — voir « les trois trous ») :
+- **V2** : une seule transaction par `ViewUpdate` (agréger deux → `compose`, C2).
+- **E2** : mono-curseur pour l'édition (multi-curseur → `compose` + `map`, C3).
+
+**Simplification propre à la route** :
+- **V1** : rendre « un `<div class="cm-line">` par ligne » plutôt que la hiérarchie `Tile`
+  de CM6 6.41 (`DocTile`/`LineTile`/`TextTile`/`MarkTile`/`WidgetTile`), qui n'existe **que**
+  pour les décorations de l'étape 4. À enrichir en Tiles quand l'étape 4 le réclamera.
+  *À valider avec Julien.*
+
+**Différé à l'intérieur de l'étape 3** (points de retour notés) :
+- **Décorations** (mark/line/widget/replace) → étape 4, qui **rouvre H3** (un widget change
+  une hauteur → invalidation) et introduit les `Tile` de V1.
+- **`draw-selection`** (curseur/sélection dessinés en couche) → la sélection native du
+  `contentEditable` suffit d'abord ; la couche vient avec le multi-curseur (post-C2/C3).
+- **bidi**, **gutters**, **tooltips/panels** → hors parcours (cf. README de `reference/`).
+- Rien de tout ça ne connaît les facets → aucun refactor du noyau étape 2 à prévoir.
+
+**Fichiers CM6 de référence** (README de `reference/`) : `editorview.ts`, `docview.ts` (V) ;
+`domobserver.ts`, `domreader.ts`, `domchange.ts` (E) ; `heightmap.ts`, `viewstate.ts` (H).
 
 ---
 
@@ -208,3 +231,5 @@ aucun refactor à prévoir de ce côté.
 |---|---|
 | 2026-08-10 | C1 terminé (176 tests). Décision de la route courte. Création de ce document. |
 | 2026-08-11 | **D1 terminé** (223 tests) — `src/state/src/selection.ts`. `extend` laissé de côté (client = les commandes, étape 5), `toJSON`/`fromJSON` omis. Divergence assumée : `inverted` en champ plutôt qu'en bit de `flags`. Prochaine étape : D2. |
+| 2026-08-22 | **D2 terminé** — `state.ts` + `transaction.ts` : `EditorState` immuable, `update(spec) -> Transaction`, `tr.state`/`tr.newDoc`/`tr.newSelection` paresseux, annotations + `userEvent`. Sauté (voir « ce que ça coûte ») : `mergeTransaction`, filtres, `reconfigure`. |
+| 2026-08-22 | **Étape 2 réduite terminée** (262 tests) — `facet.ts` (`Facet` / `FacetProvider` / `StateField` / `Configuration`) + `flatten` (`extension.ts`), branchés dans `EditorState` : `create` résout la config puis remplit les champs (`field.create(state)`, ordre = `config.fields`), `applyTransaction` les recalcule (`field.update(ancienne, tr)`), lecteurs `state.field(f)` / `state.facet(f)`. **Divergences / simplifications assumées** : valeurs de champs en `Map<StateField, any>` (pas le tableau adressé de CM6, car ni facets dynamiques ni reconfigure) ; `compare` posé mais **sans client** (aucun facet ne dépend d'un champ dans la version réduite) ; sautés franchement : précédence (`Prec`), compartiments, `compute`/`computeN`, `provide`, `toJSON`/`fromJSON`, `init`. Deux pièges verrouillés : un champ ne lit jamais un *autre* champ à l'`update`, et un `update` ne doit jamais appeler `tr.state` (récursion). Simplification à point de retour : **`flatten` ne déduplique pas** (CM6 tient un `seen`) → une même instance comptée deux fois ; inoffensif pour un `combine` « premier », faux pour un `combine` accumulateur ; se referme avec la **précédence (étape 5)**. **Prochaine étape : étape 3 — la vue.** |

@@ -216,14 +216,69 @@ reconfiguration à chaud, champs d'état dérivés, recalcul incrémental par tr
 
 # Étape 3 — La vue, le DOM et le viewport
 
-- `EditorView` + `contentEditable`, rendu des lignes, diff minimal via l'itération des
-  changements.
-- Synchro bidirectionnelle sélection DOM ↔ sélection de l'état.
-- **L'idée clé de CM6** : on *laisse le navigateur éditer*, puis on relit le DOM, on diffe,
-  on synthétise un changement et on dispatche. L'état reste seule source de vérité et
-  réimpose son rendu.
+**Objectif** : un éditeur qu'on voit et qu'on édite. L'état écrit le DOM, le DOM réécrit
+l'état, et seul le visible est rendu — à hauteurs variables.
 
-## Le viewport et la height map — **décision : version complète**
+**Critère de fin** : premier éditeur réellement utilisable. On tape au clavier, l'état
+reste seule source de vérité et réimpose son rendu ; un très gros document reste fluide
+(seul le viewport existe en DOM).
+
+**L'idée clé de CM6** : on *laisse le navigateur éditer*, puis on relit le DOM, on diffe,
+on synthétise un changement et on dispatche.
+
+Trois blocs — **V** (le rendu, état → DOM), **E** (l'édition, DOM → état), **H** (viewport
+& height map). V et E sont les deux sens du va-et-vient ; H est le problème d'échelle.
+Comme partout dans ce plan, on décrit ici les **capacités** et les **invariants** ; les
+algorithmes (diff DOM, structure de la height map, phase de mesure) se cherchent au moment
+d'écrire le bloc.
+
+## Bloc V — Le rendu : l'état écrit le DOM
+
+### V1 — L'état possède le DOM
+
+On ne manipule jamais le DOM à la main : l'état est la source de vérité, la vue **écrit**
+ce qu'il dit. `EditorView` monte l'ossature `.cm-editor > .cm-scroller > .cm-content`,
+détient le `state`, et peint **toutes** les lignes en `.cm-line`. `dispatch(tr)` applique la
+transaction et redessine. Pas encore de viewport (tout le doc en DOM) : on veut le premier
+pixel.
+
+*Démontrable* : `new EditorView({ state, parent })` affiche le document ; un `dispatch`
+d'insertion le change à l'écran.
+
+### V2 — Le changement pilote le rendu
+
+Re-peindre tout à chaque frappe est absurde : `iterChangedRanges` (bloc B) dit exactement
+ce qui a bougé, on ne reconstruit que les lignes intersectées. C'est le paiement de B2 côté
+écran.
+
+*Démontrable* : insérer un caractère ne recrée qu'**une** seule `.cm-line`.
+
+## Bloc E — L'édition : le navigateur édite, on relit
+
+### E1 — La sélection vit des deux côtés
+
+Avant de laisser éditer, le curseur doit être synchronisé dans les **deux** sens.
+État → DOM : écrire la sélection de l'état dans le DOM. DOM → état : lire la sélection DOM,
+traduire une position `(node, offset)` en offset document, dispatcher une transaction de
+sélection.
+
+⚠️ Piège : quand *on* écrit la sélection DOM, l'observateur se réveille — il faut ignorer
+nos propres écritures pour ne pas boucler.
+
+*Démontrable* : cliquer place le curseur dans l'état ; changer la sélection de l'état
+repositionne le curseur affiché.
+
+### E2 — Le navigateur édite, on relit
+
+`contentEditable` activé, le navigateur modifie le DOM tout seul ; un observateur
+(`MutationObserver`) capte la mutation → on **relit** le texte du DOM → on **diffe** contre
+l'état → on **synthétise** un `ChangeSet` → `dispatch`. L'état, seul juge, réimpose ensuite
+son rendu.
+
+*Démontrable* : taper au clavier modifie l'**état** (visible via un test/inspecteur), qui
+réimpose le rendu.
+
+## Bloc H — Le viewport et la height map — **décision : version complète**
 
 Julien a explicitement choisi la height map à hauteurs variables plutôt qu'une version
 simplifiée à hauteur de ligne uniforme. C'est la partie la plus retorse de CM6.
@@ -240,7 +295,28 @@ simplifiée à hauteur de ligne uniforme. C'est la partie la plus retorse de CM6
         └── [espace réservé, hauteur = les lignes en dessous]
 ```
 
-Le cycle, à chaque scroll :
+### H1 — Une hauteur par ligne (estimée)
+
+La height map est un arbre **parallèle** au document (nœuds text / gap / branch) qui donne
+la position verticale et la hauteur de n'importe quelle ligne, via un oracle de hauteur.
+À ce stade, hauteurs **estimées uniformément** — suffisant pour un viewport correct.
+
+*Démontrable* : la map rend une position et une hauteur cohérentes pour toute ligne ;
+hauteur totale = fonction du nombre de lignes.
+
+### H2 — Ne rendre que le visible
+
+`scrollTop` → **viewport** (la tranche de lignes visibles). Seules ces lignes existent en
+DOM, encadrées de deux **espaces réservés** dont la hauteur (donnée par H1) représente tout
+ce qui est au-dessus / en-dessous.
+
+*Démontrable* : un document de 100 000 lignes n'a que ~50 `.cm-line` en DOM ; le scroll
+fonctionne.
+
+### H3 — Mesurer sans casser la perf
+
+Les lignes n'ont pas toutes la même hauteur (retour à la ligne, tailles de police…). Il
+faut **mesurer** le vrai rendu — mais lire une hauteur force un *reflow*.
 
 ```
 scrollTop  →  height map  →  viewport (quelles lignes ?)
@@ -254,6 +330,8 @@ scrollTop  →  height map  →  viewport (quelles lignes ?)
 
 La séparation mesure / écriture existe précisément parce que lire une hauteur force un
 reflow : *toutes* les lectures dans une phase, *toutes* les écritures dans une autre.
+
+*Démontrable* : hauteurs de ligne **variables** exactes, sans reflow en boucle.
 
 ⚠️ Étape longue, et **rouverte à l'étape 4** : un widget change une hauteur, il faut
 l'invalidation.
@@ -332,6 +410,12 @@ outil pour l'agent (vérifier plutôt qu'halluciner), pas un corrigé à recopie
 # État d'avancement
 
 - [x] Plomberie en place, `npm run typecheck` vert
-- [ ] **Bloc A** — en cours dans `src/document.ts` (+ `src/types.ts`)
-- [ ] Bloc B · Bloc C · Bloc D
-- [ ] Étapes 2 à 5
+- [x] **Bloc A** (rope) — `src/state/src/text.ts`
+- [x] **Bloc B** (ChangeDesc/ChangeSet, `mapPos`) — `src/state/src/change.ts`
+- [x] **Bloc C1** (invert) — C2 (compose) / C3 (rebase) **différés**, voir `PLANbis.md`
+- [x] **Bloc D** — D1 sélection (`selection.ts`), D2 état + transaction (`state.ts`, `transaction.ts`)
+- [x] **Étape 2 réduite** — Facet / StateField / Configuration (`facet.ts`, `extension.ts`)
+- [ ] Étape 3 (vue, DOM, viewport, height map) · Étape 4 · Étape 5
+
+> L'ordre réellement suivi (route courte) et les briques différées avec leur point de
+> retour sont dans `PLANbis.md`, qui fait foi sur l'ordre.

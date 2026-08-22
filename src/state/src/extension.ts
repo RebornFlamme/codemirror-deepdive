@@ -1,7 +1,31 @@
-// type réccursif ! qui permet de passer en extension une liste d'extention ! 
-export type Extension = { extention: Extension } | readonly Extension[];
+import { FacetProvider, StateField } from "./facet";
 
-function flatten(extention: Extension): ()
+// type réccursif ! qui permet de passer en extension une liste d'extention ! 
+export type Extension = { extension: Extension } | readonly Extension[];
+
+export function flatten(extension: Extension): readonly (FacetProvider<any> | StateField<any>)[] {
+
+    let result: (FacetProvider<any> | StateField<any>)[] = [];
+
+    if (Array.isArray(extension)) {
+        for (const ext of extension) {
+            if (ext instanceof FacetProvider) {
+                result.push(ext);
+            } else if (ext instanceof StateField) {
+                result.push(ext);
+            } else {
+                result = result.concat(flatten(ext));
+            }
+        };
+    } else {
+        if (extension instanceof FacetProvider || extension instanceof StateField) {
+            result.push(extension);
+        } else {
+            result = result.concat(flatten((extension as any).extension));
+        }
+    };
+    return(result);
+}
 
 
 // Révélation : 

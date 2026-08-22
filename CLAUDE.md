@@ -508,6 +508,130 @@ au-delà du document.
 **aucun** de ses deux bords (justifie le `1`/`-1` forcé), et le test final qui montre
 qu'une plage construite avec `flags = 0` ment sur `bidiLevel` et `goalColumn`.
 
+## Design de `facet.ts` / `extension.ts` (étape 2 réduite)
+
+Le système d'extensions minimal : `Extension` (arbre aplati), `Facet` (N contributeurs
+→ 1 valeur combinée), `StateField` (état qui évolue par transaction), résolus en une
+`Configuration` branchée dans `EditorState`. Tests : `test/facet.test.ts`.
+
+**Simplifications assumées vs CM6** (sautées franchement, cf. `PLANbis.md`) : précédence
+(`Prec`), compartiments, facets dynamiques (`compute`/`computeN` + `SlotStatus`/adressage),
+`StateField.provide`/`init`/`toJSON`. Tout provider est **statique** (`of`) → `combine`
+tombe une seule fois à la résolution.
+
+### Le partage constructeur bête / fabrique intelligente
+
+Patron répété sur `Facet.define`, `StateField.define`, `Configuration` : **le
+constructeur (privé) ne voit jamais d'optionnel**, il range des arguments déjà résolus et
+calcule ses champs dérivés (`id = nextID++`, `default = combine([])`). **`define` comble
+les défauts** puis délègue.
+
+- `Facet.define` : `combine` absent → **identité** (`(a) => a`, la sortie *est* le tableau
+  des entrées). Cast `as any` **obligatoire** : `Output` est un générique flottant que TS
+  ne peut prouver égal à `readonly Input[]`. CM6 écrit le même cast.
+- `StateField.define` : `compare` absent → `(a, b) => a === b`. **Pas** de cast ici (le
+  défaut a un type net). Résous par `??` **sans muter le `spec`** (il appartient à
+  l'appelant) : `spec.compare ?? ((a, b) => a === b)` — parenthéser la flèche est
+  obligatoire (opérande droite de `??`).
+
+`nextID` est une variable de **module** partagée par `Facet` **et** `StateField` : facets
+et champs ont des `id` disjoints, ce qui autorise l'indexation commune.
+
+### `flatten` — dispatch par nœud, jamais « tableau vs le reste »
+
+`flatten(ext): readonly (FacetProvider<any> | StateField<any>)[]` empile les **feuilles**
+(providers, champs), jamais les nœuds de structure. Quatre cas traités **au même niveau**
+pour chaque nœud (patron accumulateur `inner` + `result`, un seul tableau) :
+
+1. `Array.isArray` → récurse sur chaque élément ;
+2. `instanceof FacetProvider` → feuille ;
+3. `instanceof StateField` → feuille ;
+4. sinon `{ extension }` → récurse dans `.extension`.
+
+- **L'ordre compte** : les `instanceof` (2, 3) **avant** la branche générique (4). Un
+  `StateField` a `get extension() { return this }` — le tester après la branche générique
+  boucle à l'infini.
+- **`Array.isArray` ne narrow pas un `readonly Extension[]`** (typé `arg is any[]`, or un
+  tableau readonly n'est pas assignable à `any[]`). Dans la branche `{ extension }`, TS
+  croit encore que `ext` peut être un tableau → `(ext as any).extension`. CM6 fait pareil
+  (`let content = (ext as any).extension`). C'est le cousin du cast de `asArray`.
+- **`concat` retourne, ne mute pas** : `result = result.concat(...)` **ou**
+  `result.push(...flatten(e))` ; un `result.concat(...)` nu perd toutes les feuilles.
+- ⚠️ **Pas de déduplication (divergence assumée vs CM6).** CM6 tient une `Map seen` : si la
+  **même instance** d'extension apparaît deux fois (une config partagée incluse à deux
+  endroits), il n'en garde qu'une. Ici elle est **comptée deux fois** → un `StateField`
+  créé deux fois, la valeur d'un `FacetProvider` **dupliquée** dans l'entrée de `combine`.
+  Inoffensif pour un `combine` « prend le premier » (`tabSize`), faux pour un `combine` qui
+  accumule/somme. Point de retour : avec la précédence (étape 5), où CM6 dédduplique **et**
+  garde la priorité la plus haute.
+- ⚠️ **Ordre des valeurs = ordre de rencontre dans `flatten`, point.** Pas de précédence :
+  le tableau passé à `combine` suit l'arbre aplati. « Prend le premier » veut donc dire « le
+  premier rencontré », pas « le plus prioritaire ». Ajouter `Prec` (étape 5) pourra changer
+  le résultat d'un facet sans qu'aucune contribution n'ait bougé.
+
+### API `Facet` / lecteurs volontairement tombés (sans danger tant que les facets sont statiques)
+
+- `Facet` n'a **ni `compare` ni `compareInput`** (params de `Facet.define` chez CM6) :
+  inutiles ici, nos facets sont résolus **une fois** et jamais recalculés.
+- Tombés aussi : `enables` (un facet qui active des extensions quand fourni), `FacetReader`
+  (vue lecture-seule), `Facet.from` (champ → entrée de facet), le flag `static`, et les
+  types de provider `Static/Single/Multi` (il n'existe que du statique, faute de
+  `compute`/`computeN`).
+- `state.field(f)` **lève toujours** si le champ est absent. CM6 a `field(field, require =
+  false)` qui rend `undefined` ; non repris (aucun client dans la version réduite).
+
+### Le typo `extension` et le kludge `declare extension`
+
+`type Extension = { extension: Extension } | readonly Extension[]` — la clé doit être
+`extension` **au caractère près** (un `extention` fait échouer l'assignabilité de
+`FacetProvider`). Pour qu'un `FacetProvider` compte comme `Extension`, il porte
+`declare extension: Extension` : **champ fantôme, typage pur, zéro runtime**. Personne ne
+lit jamais ce `.extension` sur un provider (`flatten` dispatche par `instanceof`), il
+n'existe que pour satisfaire la branche `{ extension }` sans cast à chaque `of()`.
+`StateField`, lui, expose `get extension(): Extension { return this }` (déclarer le retour
+`Extension`, pas `StateField<Value>` — honnêteté + pas de sous-typage récursif douteux).
+
+### `StateField` = descripteur passif (le reducer)
+
+`StateField` **ne contient pas sa valeur** — il range `create(state)`/`update(value, tr)`,
+c'est l'`EditorState` qui détient les valeurs. Patron reducer `(valeur, tr) => valeur`,
+**inversion de contrôle** : le champ est passif, l'état a l'initiative → jamais de
+monkey-patch. Générique `<Value>` (pas `<Input>` : distinct du `Input` des facets).
+
+### `Configuration` — flatten + group + combine, indexé par `id`
+
+`resolve(ext)` : `flatten` → trier les feuilles (`StateField` dans `fields`,
+`FacetProvider` groupés). **Grouper par instance `Facet`** (`Map<Facet, Input[]>`), pas par
+`id` : on a besoin de `.combine` — récupéré via `providers[0].facet` / la clé du groupe.
+Un `FacetProvider` **n'a pas de `.id`**, c'est `ext.facet.id`. Puis combiner chaque groupe
+→ `Map<number, any>` indexée par `facet.id`. `facet(f)` : `id` présent → valeur combinée,
+sinon `facet.default`. **Divergence vs CM6** : `Map` plutôt que le tableau adressé
+(`address[id] >> 1` + `staticValues`/`dynamicSlots`) — inutile sans facets dynamiques ni
+reconfigure.
+
+### Branchement dans `EditorState`
+
+`EditorState` gagne `config: Configuration` + `values: Map<StateField<any>, any>`.
+
+- **`create` (œuf/poule)** : `field.create(state)` a besoin du `state` pas encore fini.
+  Résolution : `Map` vide → construire l'état **avec cette Map** → **la remplir après**
+  (même référence, l'état se remplit tout seul), **dans l'ordre de `config.fields`** (un
+  champ tardif peut lire un champ antérieur via `state.field(...)`).
+- **`applyTransaction` (pas d'œuf/poule)** : lit l'**ancien** état (déjà complet) →
+  bâtir la `Map` **entièrement d'abord** (`field.update(this.field(field), tr)`), *puis*
+  construire le nouvel état. `this.config` repassé **par identité** (pas de reconfigure).
+- **Lecteurs** : `field(f)` **lève** (`RangeError`) si `!values.has(f)` (interrogation
+  absurde, cf. `line`/`lineAt`) ; `facet(f)` délègue à `this.config.facet(f)`.
+
+**Deux pièges de récursion verrouillés :**
+
+1. Un `update` ne doit **jamais** appeler `tr.state` — c'est précisément ce que
+   `applyTransaction` est en train de calculer (`tr._state` encore `null`) → boucle. Il lit
+   `tr.startState`, `tr.changes`, `tr.newDoc`, `tr.newSelection`.
+2. Un champ **ne peut pas lire la nouvelle valeur d'un *autre* champ** à l'`update` (il
+   faudrait le calcul paresseux par adresse de CM6). Chaque `update` = sa propre ancienne
+   valeur + `tr`. Suffisant pour ~tous les champs réels.
+
 ## Style
 
 Code et commentaires en français. Tests Vitest en français également.
